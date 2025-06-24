@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Enkel Ljudinspelare</title>
+    <title>Avancerad Ljudinspelare</title>
     <style>
         /* Import a suitable font */
         @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;700&display=swap');
@@ -23,11 +23,13 @@
         /* Container for the application */
         .app-container {
             text-align: center;
-            padding: 50px;
+            padding: 40px;
             border-radius: 25px;
             background: #1e1e1e;
             box-shadow: 0 15px 35px rgba(0, 0, 0, 0.5), 0 5px 15px rgba(0,0,0,0.3);
             transition: all 0.3s ease;
+            width: 90%;
+            max-width: 500px;
         }
 
         /* The main record button */
@@ -46,7 +48,7 @@
 
         /* Style for when recording is active */
         #recordButton.recording {
-            animation: pulse-red 1.5s infinite;
+            animation: pulse-green 1.5s infinite;
             background-color: #2ed573; /* Changes to green */
             border-radius: 30px; /* Becomes a rounded square */
             transform: rotate(45deg); /* Rotates for a diamond shape */
@@ -66,7 +68,7 @@
 
 
         /* Pulse animation for the button */
-        @keyframes pulse-red {
+        @keyframes pulse-green {
             0% {
                 box-shadow: 0 0 0 0 rgba(46, 213, 115, 0.5);
             }
@@ -77,26 +79,39 @@
                 box-shadow: 0 0 0 0 rgba(46, 213, 115, 0);
             }
         }
+        
+        /* Visualizer canvas */
+        #visualizer {
+            display: none; /* Hidden by default */
+            width: 100%;
+            height: 100px;
+            background-color: #2a2a2a;
+            border-radius: 10px;
+            margin-top: 25px;
+        }
 
         /* Timer display */
         #timer {
-            margin-top: 40px;
+            margin-top: 25px;
             font-size: 3em;
             color: #f0f0f0;
             font-weight: 700;
             letter-spacing: 2px;
             opacity: 0;
             transition: opacity 0.5s ease;
+            height: 0; /* Collapse when hidden */
+            overflow: hidden;
         }
 
         #timer.visible {
             opacity: 1;
+            height: auto;
         }
 
         /* Download link style */
         #downloadLink {
             display: none; /* Initially hidden */
-            margin-top: 30px;
+            margin-top: 20px;
             padding: 15px 30px;
             background-color: #3B3B98; /* A nice blue */
             color: white;
@@ -113,9 +128,25 @@
         }
         
         #status {
-            margin-top: 20px;
+            margin-top: 15px;
             color: #aaa;
             height: 20px; /* Reserve space to prevent layout shift */
+        }
+
+        /* Microphone selection dropdown */
+        .mic-selector {
+            margin-top: 20px;
+        }
+
+        #micSelect {
+            background-color: #2a2a2a;
+            color: #e0e0e0;
+            border: 1px solid #444;
+            padding: 10px;
+            border-radius: 8px;
+            width: 80%;
+            font-family: 'Inter', sans-serif;
+            font-size: 1em;
         }
     </style>
 </head>
@@ -123,7 +154,11 @@
 
 <div class="app-container">
     <button id="recordButton" title="Starta Inspelning"></button>
-    <div id="status">Klicka för att börja spela in</div>
+    <div id="status">Välj mikrofon och klicka för att spela in</div>
+    <div class="mic-selector">
+        <select id="micSelect" title="Välj mikrofon"></select>
+    </div>
+    <canvas id="visualizer"></canvas>
     <div id="timer">00:00</div>
     <a id="downloadLink">Ladda ner MP3</a>
 </div>
@@ -136,6 +171,8 @@
         const timerDisplay = document.getElementById('timer');
         const downloadLink = document.getElementById('downloadLink');
         const statusDisplay = document.getElementById('status');
+        const micSelect = document.getElementById('micSelect');
+        const visualizerCanvas = document.getElementById('visualizer');
 
         let isRecording = false;
         let mediaRecorder;
@@ -143,10 +180,36 @@
         let timerInterval;
         let seconds = 0;
         let audioContext;
+        let analyser;
+        let visualizerAnimationId;
+
+        // --- Populate Microphone List on Load ---
+        async function getMicrophones() {
+            try {
+                await navigator.mediaDevices.getUserMedia({ audio: true }); // Request permission first
+                const devices = await navigator.mediaDevices.enumerateDevices();
+                const audioDevices = devices.filter(device => device.kind === 'audioinput');
+
+                micSelect.innerHTML = ''; // Clear previous options
+                if (audioDevices.length > 0) {
+                    audioDevices.forEach(device => {
+                        const option = document.createElement('option');
+                        option.value = device.deviceId;
+                        option.text = device.label || `Mikrofon ${micSelect.options.length + 1}`;
+                        micSelect.appendChild(option);
+                    });
+                } else {
+                     statusDisplay.textContent = 'Inga mikrofoner hittades.';
+                }
+            } catch (err) {
+                statusDisplay.textContent = 'Ge tillåtelse för att se mikrofoner.';
+                console.error("Error getting microphone list:", err);
+            }
+        }
 
         // --- Event Listeners ---
         recordButton.addEventListener('click', toggleRecording);
-
+        
         // --- Core Functions ---
         async function toggleRecording() {
             if (!isRecording) {
@@ -158,39 +221,46 @@
 
         async function startRecording() {
             try {
-                // Get microphone access
-                const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+                const selectedDeviceId = micSelect.value;
+                if (!selectedDeviceId) {
+                    alert('Välj en mikrofon först.');
+                    return;
+                }
+                const stream = await navigator.mediaDevices.getUserMedia({ 
+                    audio: { deviceId: { exact: selectedDeviceId } }
+                });
                 
-                // Reset from previous recordings
                 audioChunks = [];
                 downloadLink.style.display = 'none';
+                visualizerCanvas.style.display = 'block';
 
-                // --- Web Audio API for Automatic Gain Control ---
                 audioContext = new (window.AudioContext || window.webkitAudioContext)();
                 const source = audioContext.createMediaStreamSource(stream);
 
-                // Create a DynamicsCompressor node to level the audio
                 const compressor = audioContext.createDynamicsCompressor();
-                compressor.threshold.setValueAtTime(-50, audioContext.currentTime); // Start compressing at -50dB
-                compressor.knee.setValueAtTime(40, audioContext.currentTime);     // Smooth transition
-                compressor.ratio.setValueAtTime(12, audioContext.currentTime);    // 12:1 compression ratio
-                compressor.attack.setValueAtTime(0, audioContext.currentTime);    // Instant attack
-                compressor.release.setValueAtTime(0.25, audioContext.currentTime);// Quick release
+                compressor.threshold.setValueAtTime(-50, audioContext.currentTime);
+                compressor.knee.setValueAtTime(40, audioContext.currentTime);
+                compressor.ratio.setValueAtTime(12, audioContext.currentTime);
+                compressor.attack.setValueAtTime(0, audioContext.currentTime);
+                compressor.release.setValueAtTime(0.25, audioContext.currentTime);
 
-                // Create a destination for the processed audio stream
                 const destination = audioContext.createMediaStreamDestination();
+                
+                // Set up analyser for visualization
+                analyser = audioContext.createAnalyser();
+                analyser.fftSize = 2048;
 
-                // Connect the nodes: source -> compressor -> destination
+                // Connect nodes for recording and visualization
+                // source -> compressor -> destination (for recording)
+                // source -> analyser (for visualization)
                 source.connect(compressor);
                 compressor.connect(destination);
+                source.connect(analyser);
+                
+                drawVisualizer(); // Start drawing
 
-                // Create MediaRecorder with the processed stream
                 mediaRecorder = new MediaRecorder(destination.stream);
-
-                mediaRecorder.ondataavailable = event => {
-                    audioChunks.push(event.data);
-                };
-
+                mediaRecorder.ondataavailable = event => audioChunks.push(event.data);
                 mediaRecorder.onstop = () => {
                     statusDisplay.textContent = 'Bearbetar...';
                     encodeToMp3();
@@ -198,84 +268,111 @@
 
                 mediaRecorder.start();
                 
-                // Update UI for recording state
                 isRecording = true;
                 recordButton.classList.add('recording');
                 recordButton.title = "Stoppa Inspelning";
                 timerDisplay.classList.add('visible');
                 statusDisplay.textContent = 'Inspelning pågår...';
+                micSelect.disabled = true;
                 startTimer();
 
             } catch (err) {
                 console.error("Could not start recording:", err);
-                statusDisplay.textContent = 'Mikrofonåtkomst nekades.';
-                alert("Kunde inte komma åt mikrofonen. Vänligen ge tillåtelse och försök igen.");
+                statusDisplay.textContent = 'Kunde inte starta inspelning.';
             }
         }
 
         function stopRecording() {
             if (mediaRecorder) {
-                mediaRecorder.stop(); // This will trigger the 'onstop' event
+                mediaRecorder.stop();
                 isRecording = false;
 
-                // Update UI for stopped state
                 recordButton.classList.remove('recording');
                 recordButton.title = "Starta Inspelning";
+                micSelect.disabled = false;
+                visualizerCanvas.style.display = 'none';
+                cancelAnimationFrame(visualizerAnimationId);
                 stopTimer();
             }
         }
+
+        function drawVisualizer() {
+            const canvasCtx = visualizerCanvas.getContext('2d');
+            const bufferLength = analyser.frequencyBinCount;
+            const dataArray = new Uint8Array(bufferLength);
+
+            canvasCtx.clearRect(0, 0, visualizerCanvas.width, visualizerCanvas.height);
+
+            function draw() {
+                visualizerAnimationId = requestAnimationFrame(draw);
+
+                analyser.getByteTimeDomainData(dataArray);
+
+                canvasCtx.fillStyle = '#1e1e1e';
+                canvasCtx.fillRect(0, 0, visualizerCanvas.width, visualizerCanvas.height);
+
+                canvasCtx.lineWidth = 2;
+                canvasCtx.strokeStyle = '#2ed573';
+                canvasCtx.beginPath();
+
+                const sliceWidth = visualizerCanvas.width * 1.0 / bufferLength;
+                let x = 0;
+
+                for (let i = 0; i < bufferLength; i++) {
+                    const v = dataArray[i] / 128.0;
+                    const y = v * visualizerCanvas.height / 2;
+
+                    if (i === 0) {
+                        canvasCtx.moveTo(x, y);
+                    } else {
+                        canvasCtx.lineTo(x, y);
+                    }
+                    x += sliceWidth;
+                }
+
+                canvasCtx.lineTo(visualizerCanvas.width, visualizerCanvas.height / 2);
+                canvasCtx.stroke();
+            }
+            draw();
+        }
         
-        function encodeToMp3() {
+        function encodeToMp3() { /* This function is unchanged */
             const audioBlob = new Blob(audioChunks, { type: 'audio/webm' });
             const reader = new FileReader();
 
             reader.onload = function(event) {
-                // Decode the audio data from the blob
                 audioContext.decodeAudioData(event.target.result)
                     .then(decodedBuffer => {
                         const mp3encoder = new lamejs.Mp3Encoder(1, decodedBuffer.sampleRate, 128); // Mono, 128kbps
-                        
-                        // Get raw audio samples
                         const samples = decodedBuffer.getChannelData(0);
                         const int16Samples = new Int16Array(samples.length);
                         for (let i = 0; i < samples.length; i++) {
                             int16Samples[i] = samples[i] * 32767.5; // Convert to 16-bit PCM
                         }
-
                         let mp3Data = [];
-                        const sampleBlockSize = 1152; // Standard block size for MP3 encoding
-
+                        const sampleBlockSize = 1152;
                         for (let i = 0; i < int16Samples.length; i += sampleBlockSize) {
                             const sampleChunk = int16Samples.subarray(i, i + sampleBlockSize);
                             const mp3buf = mp3encoder.encodeBuffer(sampleChunk);
-                            if (mp3buf.length > 0) {
-                                mp3Data.push(mp3buf);
-                            }
+                            if (mp3buf.length > 0) mp3Data.push(mp3buf);
                         }
-                        
-                        // Get the final buffer
                         const mp3buf = mp3encoder.flush();
-                        if (mp3buf.length > 0) {
-                            mp3Data.push(mp3buf);
-                        }
+                        if (mp3buf.length > 0) mp3Data.push(mp3buf);
 
-                        // Create the final MP3 blob
                         const mp3Blob = new Blob(mp3Data, { type: 'audio/mp3' });
                         const mp3Url = URL.createObjectURL(mp3Blob);
 
-                        // Update the download link
                         downloadLink.href = mp3Url;
                         downloadLink.download = `inspelning-${new Date().toISOString().slice(0,19).replace('T', '_').replace(/:/g, '-')}.mp3`;
                         downloadLink.style.display = 'block';
                         statusDisplay.textContent = 'Inspelning klar! Ladda ner din fil.';
                     });
             };
-
             reader.readAsArrayBuffer(audioBlob);
         }
 
         // --- Timer Utility Functions ---
-        function startTimer() {
+        function startTimer() { /* This function is unchanged */
             seconds = 0;
             timerDisplay.textContent = '00:00';
             timerInterval = setInterval(() => {
@@ -286,9 +383,10 @@
             }, 1000);
         }
 
-        function stopTimer() {
-            clearInterval(timerInterval);
-        }
+        function stopTimer() { clearInterval(timerInterval); }
+        
+        // --- Initialize ---
+        getMicrophones();
     });
 </script>
 
